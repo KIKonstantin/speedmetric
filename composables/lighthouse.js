@@ -1,62 +1,51 @@
-import lighthouse from 'lighthouse';
-import * as chromeLauncher from 'chrome-launcher';
-import { connectDB, Audit } from './database.js'; // Импортираме връзката и модела
+export const useLighthouse = () => {
+    const analyzing = useState('lighthouse:analyzing', () => false);
+    const loadingHistory = useState('lighthouse:loadingHistory', () => false);
+    const error = useState('lighthouse:error', () => '');
+    const latestResult = useState('lighthouse:latestResult', () => null);
+    const analyses = useState('lighthouse:analyses', () => []);
 
-async function runAudit(url) {
-    try {
-        // 1. Свързваме се с MongoDB Atlas
-        await connectDB();
+    const fetchAnalyses = async () => {
+        loadingHistory.value = true;
+        error.value = '';
+        try {
+            const { audits } = await $fetch('/api/analyses');
+            analyses.value = audits || [];
+            latestResult.value = analyses.value[0] || null;
+        } catch (err) {
+            error.value = err?.data?.statusMessage || err?.message || 'Failed to load analyses';
+        } finally {
+            loadingHistory.value = false;
+        }
+    };
 
-        // 2. Стартираме Chrome
-        const chrome = await chromeLauncher.launch({ chromeFlags: ['--headless'] });
-        const options = { logLevel: 'info', output: 'json', port: chrome.port };
-        
-        console.log(`🚀 Стартиране на одит за: ${url}...`);
-        const runnerResult = await lighthouse(url, options);
-        const reportJson = runnerResult.lhr;
+    const analyzeUrl = async (url) => {
+        analyzing.value = true;
+        error.value = '';
+        try {
+            const { audit } = await $fetch('/api/analyze', {
+                method: 'POST',
+                body: { url }
+            });
 
-        // 3. Извличаме топ препоръките (Opportunities)
-        const suggestions = Object.values(reportJson.audits)
-            .filter(audit => audit.details && audit.details.type === 'opportunity' && audit.score < 1)
-            .map(audit => ({
-                title: audit.title,
-                description: audit.description.replace(/\[Learn more\]\(.*\)\./g, ''), // Почистваме линковете
-                savingsMs: audit.details.overallSavingsMs || 0,
-                savingsBytes: audit.details.overallSavingsBytes || 0
-            }))
-            .sort((a, b) => b.savingsMs - a.savingsMs)
-            .slice(0, 5); // Вземаме само топ 5
+            latestResult.value = audit;
+            analyses.value = [audit, ...analyses.value.filter((item) => item._id !== audit._id)];
+            return audit;
+        } catch (err) {
+            error.value = err?.data?.statusMessage || err?.message || 'Analysis failed';
+            throw err;
+        } finally {
+            analyzing.value = false;
+        }
+    };
 
-        // 4. Подготвяме документа за базата данни
-        const auditData = new Audit({
-            url: reportJson.finalUrl,
-            performance: reportJson.categories.performance.score * 100,
-            accessibility: reportJson.categories.accessibility.score * 100,
-            suggestions: suggestions,
-            // Добавяме и метриките, ако решиш да ги вкараш в схемата по-късно
-            metrics: {
-                lcp: reportJson.audits['largest-contentful-paint'].displayValue,
-                tbt: reportJson.audits['total-blocking-time'].displayValue
-            }
-        });
-
-        // 5. Записваме в MongoDB
-        const savedAudit = await auditData.save();
-        
-        console.log('\n--- Одитът е завършен и записан в Atlas! ---');
-        console.log(`ID на документа: ${savedAudit._id}`);
-        console.log(`Performance Score: ${savedAudit.performance}`);
-        console.log(`Намерени предложения: ${savedAudit.suggestions.length}`);
-
-        await chrome.kill();
-        
-        // Затваряме връзката, за да не виси процеса
-        process.exit(0);
-
-    } catch (error) {
-        console.error('❌ Възникна грешка:', error);
-        process.exit(1);
-    }
-}
-
-runAudit('https://julliany.com/');
+    return {
+        analyzing,
+        loadingHistory,
+        error,
+        latestResult,
+        analyses,
+        fetchAnalyses,
+        analyzeUrl
+    };
+};
